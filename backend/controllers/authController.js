@@ -1,62 +1,108 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const db = require('../config/db');
 const sendOTP = require('../utils/sendOTP');
 
-function generateToken(user){
-  return jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+function generateToken(user) {
+  return jwt.sign({ id: user.id }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  });
 }
 
-exports.register = async (req, res) => {
-  try {
-    const { email, username, password } = req.body;
-    const existing = await User.findOne({ email });
-    if(existing) return res.status(400).json({ message: 'Email exists' });
-    const hash = password ? await bcrypt.hash(password, 10) : null;
-    const user = await User.create({ email, username, password: hash });
+exports.register = (req, res) => {
+  const { email, username, password } = req.body;
+
+  const checkQuery = 'SELECT * FROM users WHERE email = ?';
+  db.get(checkQuery, [email], (err, existingUser) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (existingUser)
+      return res.status(400).json({ message: 'Email already exists' });
+
+    const hash = password ? bcrypt.hashSync(password, 10) : null;
+    const insertQuery =
+      'INSERT INTO users (email, username, password, role) VALUES (?, ?, ?, ?)';
+
+    db.run(
+      insertQuery,
+      [email, username, hash, 'user'],
+      function (err) {
+        if (err) return res.status(500).json({ message: err.message });
+
+        const user = { id: this.lastID, email, username };
+        const token = generateToken(user);
+        res.json({ user, token });
+      }
+    );
+  });
+};
+
+exports.login = (req, res) => {
+  const { emailOrUsername, password } = req.body;
+
+  const query =
+    'SELECT * FROM users WHERE email = ? OR username = ? LIMIT 1';
+  db.get(query, [emailOrUsername, emailOrUsername], (err, user) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (!user)
+      return res.status(400).json({ message: 'Invalid credentials' });
+
+    const isValid = bcrypt.compareSync(password, user.password);
+    if (!isValid)
+      return res.status(400).json({ message: 'Invalid credentials' });
+
     const token = generateToken(user);
-    res.json({ user: { id: user._id, email: user.email, username: user.username }, token });
-  } catch(err){ res.status(500).json({ message: err.message }); }
+    res.json({
+      user: { id: user.id, email: user.email, username: user.username },
+      token,
+    });
+  });
 };
 
-exports.login = async (req, res) => {
-  try {
-    const { emailOrUsername, password } = req.body;
-    const user = await User.findOne({ $or: [{ email: emailOrUsername }, { username: emailOrUsername }] });
-    if(!user) return res.status(400).json({ message: 'Invalid credentials' });
-    const ok = await bcrypt.compare(password, user.password);
-    if(!ok) return res.status(400).json({ message: 'Invalid credentials' });
-    const token = generateToken(user);
-    res.json({ user: { id: user._id, email: user.email, username: user.username }, token });
-  } catch(err){ res.status(500).json({ message: err.message }); }
+exports.requestPasswordReset = (req, res) => {
+  const { email } = req.body;
+
+  const selectQuery = 'SELECT * FROM users WHERE email = ?';
+  db.get(selectQuery, [email], (err, user) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (!user) return res.status(400).json({ message: 'No user with email' });
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpiry = Date.now() + 10 * 60 * 1000; // 10 min
+
+    const updateQuery =
+      'UPDATE users SET otp = ?, otpExpiry = ? WHERE email = ?';
+    db.run(updateQuery, [otp, otpExpiry, email], (err) => {
+      if (err) return res.status(500).json({ message: err.message });
+
+      sendOTP(email, otp)
+        .then(() => res.json({ message: 'OTP sent to email' }))
+        .catch((err) =>
+          res.status(500).json({ message: 'Failed to send OTP' })
+        );
+    });
+  });
 };
 
-// send OTP for password reset
-exports.requestPasswordReset = async (req, res) => {
-  try {
-    const { email } = req.body;
-    const user = await User.findOne({ email });
-    if(!user) return res.status(400).json({ message: 'No user with email' });
-    const otp = Math.floor(100000 + Math.random()*900000).toString();
-    user.otp = otp;
-    user.otpExpiry = Date.now() + 10*60*1000; // 10 minutes
-    await user.save();
-    await sendOTP(email, otp);
-    res.json({ message: 'OTP sent to email' });
-  } catch(err){ res.status(500).json({ message: err.message }); }
-};
+exports.verifyOTPAndReset = (req, res) => {
+  const { email, otp, newPassword } = req.body;
 
-exports.verifyOTPAndReset = async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body;
-    const user = await User.findOne({ email });
-    if(!user) return res.status(400).json({ message: 'No user' });
-    if(!user.otp || user.otp !== otp || user.otpExpiry < Date.now())
+  const selectQuery = 'SELECT * FROM users WHERE email = ?';
+  db.get(selectQuery, [email], (err, user) => {
+    if (err) return res.status(500).json({ message: err.message });
+    if (
+      !user ||
+      !user.otp ||
+      user.otp !== otp ||
+      user.otpExpiry < Date.now()
+    )
       return res.status(400).json({ message: 'Invalid or expired OTP' });
-    user.password = await bcrypt.hash(newPassword, 10);
-    user.otp = undefined;
-    user.otpExpiry = undefined;
-    await user.save();
-    res.json({ message: 'Password updated' });
-  } catch(err){ res.status(500).json({ message: err.message }); }
+
+    const hashedPassword = bcrypt.hashSync(newPassword, 10);
+    const updateQuery =
+      'UPDATE users SET password = ?, otp = NULL, otpExpiry = NULL WHERE email = ?';
+    db.run(updateQuery, [hashedPassword, email], (err) => {
+      if (err) return res.status(500).json({ message: err.message });
+      res.json({ message: 'Password updated successfully' });
+    });
+  });
 };

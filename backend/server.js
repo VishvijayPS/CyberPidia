@@ -1,23 +1,24 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
-const authRoutes = require('./routes/authRoutes');
-const userRoutes = require('./routes/userRoutes');
+
+// Import routes
+const authRoutes = require('./routes/authRoutes'); // keep your auth routes as-is
+const userRoutes = require('./routes/userRoutes'); // keep your user routes
+const toolsRouter = require('./routes/tools');     // SQLite tools route
+const booksRouter = require('./routes/books');  
+const coursesRouter = require('./routes/courses');   // SQLite books route
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-}).then(() => console.log('MongoDB connected'))
-  .catch(err => console.log(err));
-
+// Use routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/tools', toolsRouter);
+app.use('/api/books', booksRouter);
+app.use('/api/courses', coursesRouter);
 
-app.listen(process.env.PORT || 5000, () => {
-  console.log(`Server running on port ${process.env.PORT || 5000}`);
-});
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
